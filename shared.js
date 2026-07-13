@@ -10,7 +10,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
     'use strict';
 
-    const SCHEMA_VERSION = 3;
+    const SCHEMA_VERSION = 4;
     const STORAGE_KEY = 'cnt';
     const CACHE_KEY = 'cntCache';
 
@@ -86,10 +86,16 @@
             try {
                 return structuredClone(value);
             } catch (_) {
-                // JSON-safe settings fall through to the compatibility path.
+                // Settings are JSON-safe, so the compatibility path is sufficient.
             }
         }
         return JSON.parse(JSON.stringify(value));
+    }
+
+    function stableStringify(value) {
+        if (value === null || typeof value !== 'object') return JSON.stringify(value);
+        if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+        return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(',')}}`;
     }
 
     function canonicalFontId(value) {
@@ -129,10 +135,12 @@
 
         if (!raw || raw.length > 253 || /\s/.test(raw)) return '';
         if (raw === 'localhost') return raw;
+
         if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(raw)) {
             const valid = raw.split('.').every((part) => Number(part) >= 0 && Number(part) <= 255);
             return valid ? raw : '';
         }
+
         if (raw.includes(':') && /^[0-9a-f:]+$/i.test(raw)) return raw;
 
         const labels = raw.split('.');
@@ -144,10 +152,9 @@
 
     function parseDomainInput(value) {
         const raw = String(value || '').trim();
-        const includeSubdomains = /^\*\./.test(raw) || /^\./.test(raw);
         return {
             domain: normalizeHostname(raw),
-            includeSubdomains
+            includeSubdomains: /^\*\./.test(raw) || /^\./.test(raw)
         };
     }
 
@@ -179,10 +186,7 @@
             protectIcons: booleanValue(source.protectIcons ?? source.preserveIcons, DEFAULT_BEHAVIOR.protectIcons),
             protectCode: booleanValue(source.protectCode ?? source.preserveCode, DEFAULT_BEHAVIOR.protectCode),
             protectAriaHidden: booleanValue(source.protectAriaHidden, DEFAULT_BEHAVIOR.protectAriaHidden),
-            protectAccessibilityText: booleanValue(
-                source.protectAccessibilityText,
-                DEFAULT_BEHAVIOR.protectAccessibilityText
-            ),
+            protectAccessibilityText: booleanValue(source.protectAccessibilityText, DEFAULT_BEHAVIOR.protectAccessibilityText),
             applyControls: booleanValue(source.applyControls, DEFAULT_BEHAVIOR.applyControls),
             applyEditable: booleanValue(source.applyEditable, DEFAULT_BEHAVIOR.applyEditable)
         };
@@ -210,7 +214,6 @@
             ? 'preset'
             : 'custom';
         const id = String(source.id || (sourceType === 'preset' && preset ? preset.id : `legacy:${domain}:${index}`));
-        const overrides = normalizeStyle(source.overrides ?? source.style ?? source, DEFAULT_STYLE, true);
 
         return {
             id,
@@ -218,7 +221,7 @@
             enabled: booleanValue(source.enabled, true),
             includeSubdomains: booleanValue(source.includeSubdomains ?? source.subdomains, sourceType === 'preset'),
             source: sourceType,
-            overrides
+            overrides: normalizeStyle(source.overrides ?? source.style ?? source, DEFAULT_STYLE, true)
         };
     }
 
@@ -231,7 +234,7 @@
             sites: PRESETS.map((preset) => ({
                 id: preset.id,
                 domain: preset.domain,
-                enabled: preset.id === 'preset:roblox',
+                enabled: false,
                 includeSubdomains: true,
                 source: 'preset',
                 overrides: {}
@@ -262,15 +265,21 @@
             existing.overrides = normalizeStyle(legacy.overrides ?? legacy, base.defaults, true);
         }
 
+        const incomingSites = Array.isArray(source.sites) ? source.sites : [];
+        incomingSites.forEach((entry, index) => {
+            const normalized = normalizeRule(entry, index);
+            if (normalized) rules.set(normalized.id, normalized);
+        });
+
         const customSites = Array.isArray(source.customSites) ? source.customSites : [];
         customSites.forEach((legacy, index) => {
-            const rule = normalizeRule({
+            const normalized = normalizeRule({
                 ...legacy,
                 id: legacy.id || `legacy:custom:${index}:${normalizeHostname(legacy.domain)}`,
                 source: 'custom',
                 includeSubdomains: booleanValue(legacy.includeSubdomains, true)
             }, index);
-            if (rule) rules.set(rule.id, rule);
+            if (normalized) rules.set(normalized.id, normalized);
         });
 
         const siteFontSizes = isPlainObject(source.siteFontSizes) ? source.siteFontSizes : {};
@@ -364,18 +373,24 @@
     function resolveForHost(input, hostname) {
         const settings = normalizeSettings(input);
         const host = normalizeHostname(hostname);
+
         const candidates = host
-            ? settings.sites.filter((rule) => domainMatches(host, rule)).sort((a, b) => compareSpecificity(host, a, b))
+            ? settings.sites
+                .filter((rule) => domainMatches(host, rule))
+                .filter((rule) => rule.source === 'custom' || rule.enabled)
+                .sort((a, b) => compareSpecificity(host, a, b))
             : [];
+
         const matchedRule = candidates[0] || null;
         const style = {
             ...settings.defaults,
             ...(matchedRule?.overrides || {})
         };
         const actualWeight = snapWeight(style.fontId, style.fontWeight);
+        const siteAllowed = matchedRule ? matchedRule.enabled : true;
 
         return {
-            active: Boolean(settings.globalEnabled && matchedRule?.enabled),
+            active: Boolean(settings.globalEnabled && host && siteAllowed),
             globalEnabled: settings.globalEnabled,
             hostname: host,
             matchedRule: matchedRule ? deepClone(matchedRule) : null,
@@ -452,12 +467,12 @@
         let rule = settings.sites.find((item) =>
             item.domain === host && item.includeSubdomains === false && item.source === 'custom'
         );
+
         if (!rule) {
-            const inherited = resolveForHost(settings, host);
             rule = {
                 id: createRuleId('custom'),
                 domain: host,
-                enabled: typeof enabled === 'boolean' ? enabled : Boolean(inherited.matchedRule?.enabled ?? true),
+                enabled: typeof enabled === 'boolean' ? enabled : true,
                 includeSubdomains: false,
                 source: 'custom',
                 overrides: {}
@@ -466,6 +481,7 @@
         } else if (typeof enabled === 'boolean') {
             rule.enabled = enabled;
         }
+
         return { settings, rule };
     }
 
@@ -480,6 +496,7 @@
         DEFAULT_BEHAVIOR,
         clamp,
         deepClone,
+        stableStringify,
         canonicalFontId,
         normalizeDomain: normalizeHostname,
         normalizeHostname,
