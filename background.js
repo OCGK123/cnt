@@ -6,148 +6,146 @@ const API = globalThis.CNT;
 const STORAGE_KEY = API.STORAGE_KEY;
 const CACHE_KEY = API.CACHE_KEY;
 
-function getFromStorage(area, keys) {
-    return new Promise((resolve) => {
-        area.get(keys, (result) => {
-            if (chrome.runtime.lastError) {
-                resolve({});
-                return;
-            }
-            resolve(result || {});
-        });
-    });
-}
+let lastBroadcastSignature = '';
+let settingsPromise = null;
 
-function setInStorage(area, values) {
+function chromeCall(executor, fallback) {
     return new Promise((resolve, reject) => {
-        area.set(values, () => {
-            if (chrome.runtime.lastError) {
-                reject(new Error(chrome.runtime.lastError.message));
-                return;
-            }
-            resolve();
-        });
+        try {
+            executor((value) => {
+                const error = chrome.runtime.lastError;
+                if (error) {
+                    if (fallback !== undefined) resolve(fallback);
+                    else reject(new Error(error.message));
+                    return;
+                }
+                resolve(value);
+            });
+        } catch (error) {
+            if (fallback !== undefined) resolve(fallback);
+            else reject(error);
+        }
     });
 }
 
-function queryTabs(queryInfo) {
-    return new Promise((resolve) => {
-        chrome.tabs.query(queryInfo, (tabs) => {
-            if (chrome.runtime.lastError) {
-                resolve([]);
-                return;
-            }
-            resolve(Array.isArray(tabs) ? tabs : []);
-        });
-    });
+function storageGet(area, keys) {
+    return chromeCall((done) => area.get(keys, done), {});
 }
 
-function sendTabMessage(tabId, message) {
-    return new Promise((resolve) => {
-        chrome.tabs.sendMessage(tabId, message, () => {
-            void chrome.runtime.lastError;
-            resolve();
-        });
-    });
+function storageSet(area, values) {
+    return chromeCall((done) => area.set(values, () => done(undefined)));
+}
+
+function queryTabs(queryInfo = {}) {
+    return chromeCall((done) => chrome.tabs.query(queryInfo, done), []);
 }
 
 function getTab(tabId) {
-    return new Promise((resolve) => {
-        chrome.tabs.get(tabId, (tab) => {
-            if (chrome.runtime.lastError) {
-                resolve(null);
-                return;
-            }
-            resolve(tab || null);
-        });
-    });
+    return chromeCall((done) => chrome.tabs.get(tabId, done), null);
 }
 
-async function readSettings() {
-    const synced = await getFromStorage(chrome.storage.sync, [STORAGE_KEY]);
-    if (synced[STORAGE_KEY]) {
-        return API.normalizeSettings(synced[STORAGE_KEY]);
-    }
+function sendTabMessage(tabId, message) {
+    return chromeCall((done) => chrome.tabs.sendMessage(tabId, message, () => done(undefined)), undefined)
+        .catch(() => undefined);
+}
 
-    const cached = await getFromStorage(chrome.storage.local, [CACHE_KEY]);
-    if (cached[CACHE_KEY]) {
-        return API.normalizeSettings(cached[CACHE_KEY]);
-    }
+async function readSettingsUncached() {
+    const synced = await storageGet(chrome.storage.sync, [STORAGE_KEY]);
+    if (synced[STORAGE_KEY]) return API.normalizeSettings(synced[STORAGE_KEY]);
+
+    const cached = await storageGet(chrome.storage.local, [CACHE_KEY]);
+    if (cached[CACHE_KEY]) return API.normalizeSettings(cached[CACHE_KEY]);
 
     return API.createDefaultSettings();
 }
 
-async function persistSettings(input, options = {}) {
-    const settings = API.normalizeSettings(input);
-    await setInStorage(chrome.storage.sync, { [STORAGE_KEY]: settings });
-    await setInStorage(chrome.storage.local, { [CACHE_KEY]: settings });
-
-    if (options.broadcast !== false) {
-        await broadcastSettings(settings);
+function readSettings() {
+    if (!settingsPromise) {
+        settingsPromise = readSettingsUncached().finally(() => {
+            settingsPromise = null;
+        });
     }
+    return settingsPromise;
+}
+
+async function broadcastSettings(settings) {
+    const signature = API.stableStringify(settings);
+    if (signature === lastBroadcastSignature) return;
+    lastBroadcastSignature = signature;
+
+    const tabs = await queryTabs({});
+    const messages = [];
+    for (const tab of tabs) {
+        if (!Number.isInteger(tab.id)) continue;
+        messages.push(sendTabMessage(tab.id, {
+            type: 'CNT_SETTINGS',
+            settings
+        }));
+    }
+    await Promise.allSettled(messages);
+}
+
+async function persistSettings(input) {
+    const settings = API.normalizeSettings(input);
+
+    await Promise.all([
+        storageSet(chrome.storage.sync, { [STORAGE_KEY]: settings }),
+        storageSet(chrome.storage.local, { [CACHE_KEY]: settings })
+    ]);
+
+    await broadcastSettings(settings);
     return settings;
 }
 
 async function ensureSettings() {
     const settings = await readSettings();
-    await persistSettings(settings, { broadcast: false });
+    await Promise.all([
+        storageSet(chrome.storage.sync, { [STORAGE_KEY]: settings }),
+        storageSet(chrome.storage.local, { [CACHE_KEY]: settings })
+    ]);
     return settings;
-}
-
-async function broadcastSettings(settings) {
-    const tabs = await queryTabs({});
-    await Promise.all(
-        tabs
-            .filter((tab) => Number.isInteger(tab.id))
-            .map((tab) => sendTabMessage(tab.id, {
-                type: 'CNT_SETTINGS',
-                settings
-            }))
-    );
 }
 
 function hostnameFromUrl(url) {
     try {
-        return API.normalizeHostname(new URL(url).hostname);
+        const parsed = new URL(url);
+        if (parsed.protocol === 'file:') return 'local-file';
+        return API.normalizeHostname(parsed.hostname);
     } catch (_) {
         return '';
     }
 }
 
 async function topHostnameForSender(sender) {
-    if (sender?.tab?.url) {
-        const fromSender = hostnameFromUrl(sender.tab.url);
-        if (fromSender) return fromSender;
-    }
+    const direct = hostnameFromUrl(sender?.tab?.url || '');
+    if (direct) return direct;
 
     if (Number.isInteger(sender?.tab?.id)) {
         const tab = await getTab(sender.tab.id);
-        const fromTab = hostnameFromUrl(tab?.url || '');
-        if (fromTab) return fromTab;
+        return hostnameFromUrl(tab?.url || '');
     }
 
     return '';
 }
 
 chrome.runtime.onInstalled.addListener(() => {
-    ensureSettings().catch(() => {});
+    ensureSettings().catch(() => undefined);
 });
 
 chrome.runtime.onStartup.addListener(() => {
-    ensureSettings().catch(() => {});
+    ensureSettings().catch(() => undefined);
 });
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
     if (areaName !== 'sync' || !changes[STORAGE_KEY]) return;
 
-    const nextValue = changes[STORAGE_KEY].newValue;
-    const settings = nextValue
-        ? API.normalizeSettings(nextValue)
+    const settings = changes[STORAGE_KEY].newValue
+        ? API.normalizeSettings(changes[STORAGE_KEY].newValue)
         : API.createDefaultSettings();
 
-    setInStorage(chrome.storage.local, { [CACHE_KEY]: settings })
+    storageSet(chrome.storage.local, { [CACHE_KEY]: settings })
         .then(() => broadcastSettings(settings))
-        .catch(() => {});
+        .catch(() => undefined);
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
