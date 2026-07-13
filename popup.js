@@ -3,52 +3,80 @@
 const API = globalThis.CNT;
 const $ = (id) => document.getElementById(id);
 
-let settings = API.createDefaultSettings();
+let settings = API?.createDefaultSettings?.() || null;
 let currentHost = '';
+let activeTabId = null;
 let scope = 'global';
 let saveTimer = 0;
+let previewFrame = 0;
+let revision = 0;
+let saving = false;
+let dirty = false;
+let pendingToast = '저장됨';
 
-function runtimeMessage(message) {
+function runtimeMessage(message, timeoutMs = 2000) {
     return new Promise((resolve, reject) => {
-        chrome.runtime.sendMessage(message, (response) => {
-            if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
-            if (!response?.ok) return reject(new Error(response?.error || '요청을 처리하지 못했습니다.'));
-            resolve(response);
-        });
+        let settled = false;
+        const timer = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            reject(new Error('백그라운드 응답이 없습니다. 확장 프로그램을 다시 로드하세요.'));
+        }, timeoutMs);
+
+        try {
+            chrome.runtime.sendMessage(message, (response) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+
+                if (chrome.runtime.lastError) {
+                    reject(new Error(chrome.runtime.lastError.message));
+                    return;
+                }
+                if (!response?.ok) {
+                    reject(new Error(response?.error || '요청을 처리하지 못했습니다.'));
+                    return;
+                }
+                resolve(response);
+            });
+        } catch (error) {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            reject(error);
+        }
     });
 }
 
 function activeTab() {
     return new Promise((resolve) => {
-        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => resolve(tabs?.[0] || null));
+        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+            if (chrome.runtime.lastError) {
+                resolve(null);
+                return;
+            }
+            resolve(tabs?.[0] || null);
+        });
     });
 }
 
 function toast(message, error = false) {
-    const el = $('toast');
-    el.textContent = message;
-    el.classList.toggle('error', error);
-    el.classList.add('show');
-    clearTimeout(el._timer);
-    el._timer = setTimeout(() => el.classList.remove('show'), 1800);
-}
-
-function scheduleSave(message = '저장됨') {
-    clearTimeout(saveTimer);
-    saveTimer = setTimeout(async () => {
-        try {
-            const response = await runtimeMessage({ type: 'CNT_SAVE_SETTINGS', settings });
-            settings = API.normalizeSettings(response.settings);
-            render();
-            toast(message);
-        } catch (error) {
-            toast(error.message, true);
-        }
-    }, 120);
+    const element = $('toast');
+    if (!element) return;
+    element.textContent = message;
+    element.classList.toggle('error', error);
+    element.classList.add('show');
+    clearTimeout(element._timer);
+    element._timer = setTimeout(() => element.classList.remove('show'), 1800);
 }
 
 function exactRule() {
-    return settings.sites.find((rule) => rule.source === 'custom' && rule.domain === currentHost && !rule.includeSubdomains) || null;
+    if (!settings || !currentHost) return null;
+    return settings.sites.find((rule) =>
+        rule.source === 'custom' &&
+        rule.domain === currentHost &&
+        rule.includeSubdomains === false
+    ) || null;
 }
 
 function ensureRule(enabled) {
@@ -66,44 +94,131 @@ function effective() {
     return API.resolveForHost(settings, currentHost);
 }
 
-function setScope(next) {
-    if (next === 'site' && !currentHost) return;
-    scope = next;
-    render();
+function sendPreviewNow() {
+    previewFrame = 0;
+    if (!Number.isInteger(activeTabId) || !currentHost) return;
+
+    const resolved = effective();
+    try {
+        chrome.tabs.sendMessage(activeTabId, {
+            type: 'CNT_PREVIEW',
+            resolved
+        }, () => {
+            void chrome.runtime.lastError;
+        });
+    } catch (_) {
+        // Pages without a content script are intentionally ignored.
+    }
 }
 
-function updateStyle(property, value) {
-    if (scope === 'global') settings.defaults[property] = value;
-    else ensureRule().overrides[property] = value;
+function queuePreview() {
+    if (previewFrame) return;
+    previewFrame = requestAnimationFrame(sendPreviewNow);
+}
+
+function markDirty(message = '저장됨', immediate = false) {
+    revision += 1;
+    dirty = true;
+    pendingToast = message;
+    queuePreview();
+
+    clearTimeout(saveTimer);
+    if (immediate) {
+        void flushSave();
+    } else {
+        saveTimer = setTimeout(() => void flushSave(), 260);
+    }
+}
+
+async function flushSave() {
+    clearTimeout(saveTimer);
+    saveTimer = 0;
+    if (!dirty || saving || !settings) return;
+
+    const savedRevision = revision;
+    const snapshot = API.deepClone(settings);
+    const successMessage = pendingToast;
+    let failed = false;
+    dirty = false;
+    saving = true;
+
+    try {
+        const response = await runtimeMessage({
+            type: 'CNT_SAVE_SETTINGS',
+            settings: snapshot
+        });
+
+        if (revision === savedRevision) {
+            settings = API.normalizeSettings(response.settings);
+            render();
+            toast(successMessage);
+        }
+    } catch (error) {
+        dirty = true;
+        failed = true;
+        toast(error.message, true);
+    } finally {
+        saving = false;
+        if (dirty && !failed) {
+            clearTimeout(saveTimer);
+            saveTimer = setTimeout(() => void flushSave(), 120);
+        }
+    }
+}
+
+function setScope(nextScope) {
+    if (nextScope === 'site' && !currentHost) return;
+    scope = nextScope;
+    renderHeader();
     renderStyle();
-    scheduleSave();
+}
+
+function updateStyle(property, value, immediate = false) {
+    if (scope === 'global') {
+        settings.defaults[property] = value;
+    } else {
+        ensureRule(true).overrides[property] = value;
+    }
+    renderStyle();
+    markDirty('저장됨', immediate);
 }
 
 function inherit(property) {
     const rule = exactRule();
-    if (!rule) return;
+    if (!rule || !(property in rule.overrides)) return;
     delete rule.overrides[property];
     renderStyle();
-    scheduleSave('기본값으로 변경됨');
+    markDirty('기본값으로 변경됨', true);
 }
 
 function renderHeader() {
     const resolved = effective();
     const exact = exactRule();
-    $('masterToggle').disabled = false;
-    $('masterToggle').checked = settings.globalEnabled;
-    $('masterStateText').textContent = settings.globalEnabled ? '켜짐' : '꺼짐';
+    const masterToggle = $('masterToggle');
+    const siteToggle = $('siteToggle');
+    const statusBadge = $('effectiveStatus');
+
+    masterToggle.disabled = false;
+    masterToggle.checked = settings.globalEnabled;
+    $('masterStateText').textContent = settings.globalEnabled ? '모든 사이트 적용' : '전체 중지';
 
     $('currentSiteTitle').textContent = currentHost || '지원하지 않는 페이지';
-    $('siteToggle').disabled = !currentHost;
-    $('siteToggle').checked = Boolean(exact?.enabled ?? resolved.matchedRule?.enabled);
+    siteToggle.disabled = !currentHost;
+    siteToggle.checked = resolved.active;
+
     $('siteStatusDot').className = `status-dot ${resolved.active ? 'active' : currentHost ? 'blocked' : ''}`;
-    $('effectiveStatus').textContent = resolved.active ? '적용 중' : settings.globalEnabled ? '미적용' : '전체 꺼짐';
-    $('siteToggleHint').textContent = exact
-        ? '이 호스트의 정확한 예외 규칙입니다.'
-        : resolved.matchedRule
-            ? `${resolved.matchedRule.domain} 규칙을 상속 중입니다.`
-            : '이 주소에만 별도로 적용합니다.';
+    statusBadge.className = `status-badge ${resolved.active ? 'active' : settings.globalEnabled ? 'blocked' : 'inactive'}`;
+    statusBadge.textContent = resolved.active ? '즉시 적용 중' : settings.globalEnabled ? '이 사이트 제외' : '전체 꺼짐';
+
+    if (exact?.enabled === false) {
+        $('siteToggleHint').textContent = '이 호스트만 폰트 적용에서 제외했습니다.';
+    } else if (exact?.enabled === true) {
+        $('siteToggleHint').textContent = '이 호스트의 개별 설정을 사용합니다.';
+    } else if (resolved.matchedRule) {
+        $('siteToggleHint').textContent = `${resolved.matchedRule.domain} 규칙을 사용합니다.`;
+    } else {
+        $('siteToggleHint').textContent = '전체 기본 설정을 바로 적용합니다.';
+    }
 
     $('scopeSite').disabled = !currentHost;
     $('scopeGlobal').classList.toggle('active', scope === 'global');
@@ -114,10 +229,9 @@ function renderHeader() {
 
 function renderStyle() {
     const own = editableStyle();
-    const style = scope === 'global' ? settings.defaults : {
-        ...settings.defaults,
-        ...own
-    };
+    const style = scope === 'global'
+        ? settings.defaults
+        : { ...settings.defaults, ...own };
 
     document.querySelectorAll('input[name="fontId"]').forEach((input) => {
         input.checked = input.value === style.fontId || (input.value === 'myeongjo' && style.fontId === 'nanum');
@@ -125,22 +239,26 @@ function renderStyle() {
 
     const size = style.fontSize;
     const weight = style.fontWeight;
-    $('sizeSlider').value = size;
+    const actualWeight = API.snapWeight(style.fontId, weight);
+
+    $('sizeSlider').value = String(size);
     $('sizeValue').textContent = `${size}%`;
     $('sizeSlider').style.setProperty('--range-fill', `${((size - 75) / 75) * 100}%`);
     $('sizeSlider').setAttribute('aria-valuetext', `${size}퍼센트`);
-    $('weightSlider').value = weight;
+
+    $('weightSlider').value = String(weight);
     $('weightValue').textContent = String(weight);
     $('weightSlider').style.setProperty('--range-fill', `${((weight - 100) / 800) * 100}%`);
+    $('weightSlider').setAttribute('aria-valuetext', `${weight}`);
     $('requestedWeight').textContent = String(weight);
-    $('actualWeight').textContent = String(API.snapWeight(style.fontId, weight));
+    $('actualWeight').textContent = String(actualWeight);
 
     document.querySelectorAll('.quick-button').forEach((button) => {
         button.classList.toggle('active', Number(button.dataset.size) === size);
     });
 
-    $('sizeContext').textContent = scope === 'global' ? '전체 기본 배율' : `${currentHost} 유효 배율`;
-    $('weightContext').textContent = scope === 'global' ? '전체 기본 굵기' : `${currentHost} 유효 굵기`;
+    $('sizeContext').textContent = scope === 'global' ? '모든 사이트 기본 배율' : `${currentHost} 개별 배율`;
+    $('weightContext').textContent = scope === 'global' ? '기존 굵기를 기준으로 보정' : `${currentHost} 개별 굵기`;
     $('inheritFont').hidden = scope !== 'site' || !('fontId' in own);
     $('inheritSize').hidden = scope !== 'site' || !('fontSize' in own);
     $('inheritWeight').hidden = scope !== 'site' || !('fontWeight' in own);
@@ -148,23 +266,28 @@ function renderStyle() {
 
     const preview = $('livePreview');
     preview.dataset.font = style.fontId;
-    preview.dataset.weight = API.snapWeight(style.fontId, weight);
+    preview.dataset.weight = String(actualWeight);
     preview.style.fontSize = `${Math.max(12, 15 * size / 100)}px`;
     $('app').dataset.previewFont = style.fontId;
-    $('app').dataset.previewWeight = String(API.snapWeight(style.fontId, weight));
+    $('app').dataset.previewWeight = String(actualWeight);
 }
 
 function makeSwitch(checked, label, onChange) {
     const wrapper = document.createElement('label');
     wrapper.className = 'mini-switch';
+
     const input = document.createElement('input');
     input.type = 'checkbox';
     input.className = 'visually-hidden';
     input.checked = checked;
     input.setAttribute('aria-label', label);
+
     const track = document.createElement('span');
     track.className = 'switch-track';
-    track.innerHTML = '<span class="switch-thumb"></span>';
+    const thumb = document.createElement('span');
+    thumb.className = 'switch-thumb';
+    track.append(thumb);
+
     input.addEventListener('change', () => onChange(input.checked));
     wrapper.append(input, track);
     return wrapper;
@@ -173,10 +296,12 @@ function makeSwitch(checked, label, onChange) {
 function renderPresets() {
     const list = $('presetList');
     list.replaceChildren();
+
     for (const preset of API.PRESETS) {
         const rule = settings.sites.find((item) => item.id === preset.id);
         const item = document.createElement('div');
         item.className = 'preset-item';
+
         const copy = document.createElement('div');
         copy.className = 'preset-copy';
         const title = document.createElement('strong');
@@ -184,11 +309,12 @@ function renderPresets() {
         const domain = document.createElement('small');
         domain.textContent = preset.domain;
         copy.append(title, domain);
-        item.append(copy, makeSwitch(Boolean(rule?.enabled), `${preset.name} 적용`, (checked) => {
+
+        item.append(copy, makeSwitch(Boolean(rule?.enabled), `${preset.name} 명시 규칙`, (checked) => {
             const target = settings.sites.find((entry) => entry.id === preset.id);
             target.enabled = checked;
-            scheduleSave();
-            render();
+            renderHeader();
+            markDirty(`${preset.name} 규칙 변경됨`, true);
         }));
         list.append(item);
     }
@@ -199,6 +325,7 @@ function renderRules() {
     const rules = settings.sites
         .filter((rule) => rule.source === 'custom')
         .filter((rule) => !query || rule.domain.includes(query));
+
     const list = $('ruleList');
     list.replaceChildren();
     $('ruleEmpty').hidden = rules.length > 0;
@@ -206,31 +333,36 @@ function renderRules() {
 
     for (const rule of rules) {
         const item = document.createElement('div');
-        item.className = 'rule-item';
+        item.className = `rule-item${rule.enabled ? '' : ' rule-disabled'}`;
+
         const copy = document.createElement('div');
         copy.className = 'rule-copy';
         const title = document.createElement('strong');
         title.textContent = rule.includeSubdomains ? `*.${rule.domain}` : rule.domain;
         const meta = document.createElement('small');
         meta.className = 'rule-meta';
-        meta.textContent = Object.keys(rule.overrides).length ? '사이트별 스타일 있음' : '기본 스타일 사용';
+        meta.textContent = rule.enabled
+            ? Object.keys(rule.overrides).length ? '개별 스타일 적용' : '전체 기본값 사용'
+            : '이 사이트 제외';
         copy.append(title, meta);
-        const del = document.createElement('button');
-        del.type = 'button';
-        del.className = 'delete-button';
-        del.textContent = '×';
-        del.setAttribute('aria-label', `${rule.domain} 삭제`);
-        del.addEventListener('click', () => {
+
+        const removeButton = document.createElement('button');
+        removeButton.type = 'button';
+        removeButton.className = 'delete-button';
+        removeButton.textContent = '×';
+        removeButton.setAttribute('aria-label', `${rule.domain} 규칙 삭제`);
+        removeButton.addEventListener('click', () => {
             settings = API.removeRule(settings, rule.id);
             if (currentHost === rule.domain) scope = 'global';
-            scheduleSave('규칙 삭제됨');
             render();
+            markDirty('규칙 삭제됨', true);
         });
+
         item.append(copy, makeSwitch(rule.enabled, `${rule.domain} 적용`, (checked) => {
             rule.enabled = checked;
-            scheduleSave();
             render();
-        }), del);
+            markDirty(checked ? '사이트 적용 켜짐' : '사이트 제외됨', true);
+        }), removeButton);
         list.append(item);
     }
 }
@@ -251,53 +383,74 @@ function render() {
 
 function bindTabs() {
     const tabs = [...document.querySelectorAll('.tab-button')];
+
+    function selectTab(selected) {
+        tabs.forEach((tab) => {
+            const selectedNow = tab === selected;
+            tab.classList.toggle('active', selectedNow);
+            tab.setAttribute('aria-selected', String(selectedNow));
+            tab.tabIndex = selectedNow ? 0 : -1;
+            const panel = $(tab.getAttribute('aria-controls'));
+            panel.hidden = !selectedNow;
+            panel.classList.toggle('active', selectedNow);
+            if (selectedNow) panel.scrollTop = 0;
+        });
+    }
+
     tabs.forEach((tab, index) => {
         tab.addEventListener('click', () => selectTab(tab));
         tab.addEventListener('keydown', (event) => {
             if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
             event.preventDefault();
-            const next = (index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+            const direction = event.key === 'ArrowRight' ? 1 : -1;
+            const next = (index + direction + tabs.length) % tabs.length;
             tabs[next].focus();
             selectTab(tabs[next]);
         });
     });
-
-    function selectTab(selected) {
-        tabs.forEach((tab) => {
-            const active = tab === selected;
-            tab.classList.toggle('active', active);
-            tab.setAttribute('aria-selected', String(active));
-            tab.tabIndex = active ? 0 : -1;
-            const panel = $(tab.getAttribute('aria-controls'));
-            panel.hidden = !active;
-            panel.classList.toggle('active', active);
-        });
-    }
 }
 
 function bindEvents() {
     bindTabs();
+
     $('scopeGlobal').addEventListener('click', () => setScope('global'));
     $('scopeSite').addEventListener('click', () => setScope('site'));
+
     $('masterToggle').addEventListener('change', (event) => {
         settings.globalEnabled = event.target.checked;
-        scheduleSave();
-        render();
+        renderHeader();
+        markDirty(event.target.checked ? '전체 적용 켜짐' : '전체 적용 꺼짐', true);
     });
+
     $('siteToggle').addEventListener('change', (event) => {
         ensureRule(event.target.checked);
         scope = 'site';
-        scheduleSave();
         render();
+        markDirty(event.target.checked ? '이 사이트 적용 켜짐' : '이 사이트 제외됨', true);
     });
+
     document.querySelectorAll('input[name="fontId"]').forEach((input) => {
-        input.addEventListener('change', () => updateStyle('fontId', API.canonicalFontId(input.value)));
+        input.addEventListener('change', () => {
+            updateStyle('fontId', API.canonicalFontId(input.value), true);
+        });
     });
-    $('sizeSlider').addEventListener('input', (event) => updateStyle('fontSize', Number(event.target.value)));
-    $('weightSlider').addEventListener('input', (event) => updateStyle('fontWeight', Number(event.target.value)));
+
+    $('sizeSlider').addEventListener('input', (event) => {
+        updateStyle('fontSize', Number(event.target.value));
+    });
+    $('sizeSlider').addEventListener('change', () => void flushSave());
+
+    $('weightSlider').addEventListener('input', (event) => {
+        updateStyle('fontWeight', Number(event.target.value));
+    });
+    $('weightSlider').addEventListener('change', () => void flushSave());
+
     document.querySelectorAll('.quick-button').forEach((button) => {
-        button.addEventListener('click', () => updateStyle('fontSize', Number(button.dataset.size)));
+        button.addEventListener('click', () => {
+            updateStyle('fontSize', Number(button.dataset.size), true);
+        });
     });
+
     $('inheritFont').addEventListener('click', () => inherit('fontId'));
     $('inheritSize').addEventListener('click', () => inherit('fontSize'));
     $('inheritWeight').addEventListener('click', () => inherit('fontWeight'));
@@ -306,35 +459,53 @@ function bindEvents() {
         if (!rule) return;
         rule.overrides = {};
         renderStyle();
-        scheduleSave('사이트 스타일 초기화됨');
+        markDirty('사이트별 스타일 초기화됨', true);
     });
+
     $('protectIcons').addEventListener('change', (event) => {
         settings.behavior.protectIcons = event.target.checked;
-        scheduleSave();
+        markDirty('아이콘 보호 설정 변경됨', true);
     });
+
     $('protectCode').addEventListener('change', (event) => {
         settings.behavior.protectCode = event.target.checked;
-        scheduleSave();
+        markDirty('코드 보호 설정 변경됨', true);
     });
+
     $('addCurrentSite').addEventListener('click', () => {
         ensureRule(true);
         scope = 'site';
-        scheduleSave('현재 사이트 추가됨');
         render();
+        markDirty('현재 사이트 규칙 추가됨', true);
     });
+
     $('addSiteForm').addEventListener('submit', (event) => {
         event.preventDefault();
-        const parsed = API.parseDomainInput($('siteInput').value);
+        const input = $('siteInput');
+        const message = $('siteInputMessage');
+        const parsed = API.parseDomainInput(input.value);
+
         if (!parsed.domain) {
-            $('siteInput').setAttribute('aria-invalid', 'true');
-            $('siteInputMessage').textContent = '올바른 URL 또는 도메인을 입력하세요.';
-            $('siteInputMessage').classList.add('error');
+            input.setAttribute('aria-invalid', 'true');
+            message.textContent = '올바른 URL 또는 도메인을 입력하세요.';
+            message.classList.add('error');
             return;
         }
-        $('siteInput').removeAttribute('aria-invalid');
-        $('siteInputMessage').classList.remove('error');
-        const duplicate = settings.sites.some((rule) => rule.source === 'custom' && rule.domain === parsed.domain && rule.includeSubdomains === parsed.includeSubdomains);
-        if (duplicate) return toast('이미 같은 규칙이 있습니다.', true);
+
+        input.removeAttribute('aria-invalid');
+        message.classList.remove('error');
+        message.textContent = '주소를 붙여 넣으면 호스트만 안전하게 정리합니다.';
+
+        const duplicate = settings.sites.some((rule) =>
+            rule.source === 'custom' &&
+            rule.domain === parsed.domain &&
+            rule.includeSubdomains === parsed.includeSubdomains
+        );
+        if (duplicate) {
+            toast('이미 같은 규칙이 있습니다.', true);
+            return;
+        }
+
         settings.sites.push({
             id: API.createRuleId('custom'),
             domain: parsed.domain,
@@ -343,50 +514,71 @@ function bindEvents() {
             source: 'custom',
             overrides: {}
         });
-        $('siteInput').value = '';
-        scheduleSave('사이트 규칙 추가됨');
+        input.value = '';
         render();
+        markDirty('사이트 규칙 추가됨', true);
     });
+
     $('siteSearch').addEventListener('input', renderRules);
+
     $('resetSettings').addEventListener('click', async () => {
         if (!confirm('모든 CNT 설정을 초기화할까요?')) return;
         try {
             const response = await runtimeMessage({ type: 'CNT_RESET_SETTINGS' });
             settings = API.normalizeSettings(response.settings);
+            revision += 1;
+            dirty = false;
             scope = 'global';
             render();
+            queuePreview();
             toast('설정 초기화 완료');
         } catch (error) {
             toast(error.message, true);
         }
     });
+
+    window.addEventListener('pagehide', () => {
+        if (dirty) void flushSave();
+    });
 }
 
 async function initialize() {
+    if (!API) {
+        throw new Error('shared.js를 불러오지 못했습니다. 확장 프로그램을 다시 설치하세요.');
+    }
+
     bindEvents();
+    const [response, tab] = await Promise.all([
+        runtimeMessage({ type: 'CNT_GET_SETTINGS' }),
+        activeTab()
+    ]);
+
+    settings = API.normalizeSettings(response.settings);
+    activeTabId = Number.isInteger(tab?.id) ? tab.id : null;
+
     try {
-        const [response, tab] = await Promise.all([
-            runtimeMessage({ type: 'CNT_GET_SETTINGS' }),
-            activeTab()
-        ]);
-        settings = API.normalizeSettings(response.settings);
-        try {
-            const url = new URL(tab?.url || '');
-            if (['http:', 'https:', 'file:'].includes(url.protocol)) currentHost = API.normalizeHostname(url.hostname || 'localhost');
-        } catch (_) {
-            currentHost = '';
+        const url = new URL(tab?.url || '');
+        if (['http:', 'https:'].includes(url.protocol)) {
+            currentHost = API.normalizeHostname(url.hostname);
+        } else if (url.protocol === 'file:') {
+            currentHost = 'local-file';
         }
-        $('addCurrentSite').disabled = !currentHost;
-        $('addCurrentSiteText').textContent = currentHost ? `${currentHost} 추가` : '현재 사이트 추가';
-        $('loadingState').hidden = true;
-        $('workspace').hidden = false;
-        $('app').dataset.loading = 'false';
-        render();
-    } catch (error) {
+    } catch (_) {
+        currentHost = '';
+    }
+
+    $('addCurrentSite').disabled = !currentHost;
+    $('addCurrentSiteText').textContent = currentHost ? `${currentHost} 규칙 추가` : '현재 사이트 추가';
+    $('loadingState').hidden = true;
+    $('workspace').hidden = false;
+    $('app').dataset.loading = 'false';
+    render();
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    initialize().catch((error) => {
         $('loadingState').hidden = true;
         $('workspace').hidden = false;
         toast(error.message, true);
-    }
-}
-
-document.addEventListener('DOMContentLoaded', initialize, { once: true });
+    });
+}, { once: true });

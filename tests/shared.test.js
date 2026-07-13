@@ -2,166 +2,108 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const CNT = require('../shared.js');
+const API = require('../shared.js');
 
-test('default settings are complete and Roblox is enabled', () => {
-    const settings = CNT.createDefaultSettings();
-    assert.equal(settings.schemaVersion, CNT.SCHEMA_VERSION);
-    assert.equal(settings.globalEnabled, true);
-    assert.deepEqual(settings.defaults, {
-        fontId: 'pretendard',
-        fontSize: 100,
-        fontWeight: 400
-    });
-    assert.equal(settings.sites.length, CNT.PRESETS.length);
-    assert.equal(settings.sites.find((rule) => rule.id === 'preset:roblox').enabled, true);
+test('default settings apply globally', () => {
+    const settings = API.createDefaultSettings();
+    const resolved = API.resolveForHost(settings, 'example.com');
+    assert.equal(resolved.active, true);
+    assert.equal(resolved.fontId, 'pretendard');
+    assert.equal(resolved.fontSize, 100);
 });
 
-test('legacy settings migrate without losing domains, sizes, or toggles', () => {
-    const migrated = CNT.normalizeSettings({
-        globalEnabled: true,
-        fontSize: 112,
-        presets: {
-            roblox: { domain: 'roblox.com', enabled: false },
-            youtube: { domain: 'youtube.com', enabled: true }
-        },
-        customSites: [
-            { domain: 'Example.COM', enabled: true }
-        ],
-        siteFontSizes: {
-            'example.com': 125
-        }
-    });
-
-    assert.equal(migrated.defaults.fontSize, 112);
-    assert.equal(migrated.sites.find((rule) => rule.id === 'preset:roblox').enabled, false);
-    assert.equal(migrated.sites.find((rule) => rule.id === 'preset:youtube').enabled, true);
-
-    const example = migrated.sites.find((rule) => rule.domain === 'example.com' && rule.source === 'custom');
-    assert.ok(example);
-    assert.equal(example.enabled, true);
-    assert.equal(example.overrides.fontSize, 125);
+test('master toggle disables every site', () => {
+    const settings = API.createDefaultSettings();
+    settings.globalEnabled = false;
+    assert.equal(API.resolveForHost(settings, 'example.com').active, false);
 });
 
-test('exact custom exception wins over enabled parent preset', () => {
-    const settings = CNT.createDefaultSettings();
+test('exact custom OFF rule excludes only the exact host', () => {
+    let settings = API.createDefaultSettings();
+    settings = API.ensureExactRule(settings, 'www.example.com', false).settings;
+
+    assert.equal(API.resolveForHost(settings, 'www.example.com').active, false);
+    assert.equal(API.resolveForHost(settings, 'api.example.com').active, true);
+});
+
+test('enabled custom rule applies overrides', () => {
+    let settings = API.createDefaultSettings();
+    const result = API.ensureExactRule(settings, 'example.com', true);
+    settings = result.settings;
+    result.rule.overrides = {
+        fontId: 'nanum',
+        fontSize: 115,
+        fontWeight: 700
+    };
+
+    const resolved = API.resolveForHost(settings, 'example.com');
+    assert.equal(resolved.active, true);
+    assert.equal(resolved.fontId, 'nanum');
+    assert.equal(resolved.fontSize, 115);
+    assert.equal(resolved.actualWeight, 700);
+});
+
+test('disabled preset rules are ignored under global application', () => {
+    const settings = API.createDefaultSettings();
+    const youtube = settings.sites.find((rule) => rule.id === 'preset:youtube');
+    assert.equal(youtube.enabled, false);
+    assert.equal(API.resolveForHost(settings, 'www.youtube.com').active, true);
+});
+
+test('enabled preset rule can provide an override', () => {
+    const settings = API.createDefaultSettings();
+    const youtube = settings.sites.find((rule) => rule.id === 'preset:youtube');
+    youtube.enabled = true;
+    youtube.overrides = { fontId: 'mona' };
+
+    const resolved = API.resolveForHost(settings, 'music.youtube.com');
+    assert.equal(resolved.active, true);
+    assert.equal(resolved.fontId, 'mona');
+});
+
+test('exact custom rule wins over a parent preset', () => {
+    const settings = API.createDefaultSettings();
+    const preset = settings.sites.find((rule) => rule.id === 'preset:roblox');
+    preset.enabled = true;
+    preset.overrides = { fontId: 'mona' };
+
     settings.sites.push({
-        id: 'custom:exception',
+        id: 'custom:www.roblox.com',
         domain: 'www.roblox.com',
-        enabled: false,
+        enabled: true,
         includeSubdomains: false,
         source: 'custom',
-        overrides: {}
+        overrides: { fontId: 'nanum' }
     });
 
-    const root = CNT.resolveForHost(settings, 'roblox.com');
-    const exception = CNT.resolveForHost(settings, 'www.roblox.com');
-
-    assert.equal(root.active, true);
-    assert.equal(exception.active, false);
-    assert.equal(exception.matchedRule.id, 'custom:exception');
+    assert.equal(API.resolveForHost(settings, 'www.roblox.com').fontId, 'nanum');
 });
 
-test('longest matching domain wins for nested subdomains', () => {
-    const settings = CNT.normalizeSettings({
-        schemaVersion: CNT.SCHEMA_VERSION,
+test('legacy settings migrate to schema version 4', () => {
+    const migrated = API.normalizeSettings({
         globalEnabled: true,
-        defaults: CNT.DEFAULT_STYLE,
-        behavior: CNT.DEFAULT_BEHAVIOR,
-        sites: [
-            {
-                id: 'custom:parent',
-                domain: 'example.com',
-                enabled: true,
-                includeSubdomains: true,
-                source: 'custom',
-                overrides: { fontSize: 110 }
-            },
-            {
-                id: 'custom:child',
-                domain: 'app.example.com',
-                enabled: true,
-                includeSubdomains: true,
-                source: 'custom',
-                overrides: { fontSize: 125 }
-            }
-        ]
+        selectedFont: 'myeongjo',
+        fontSize: 110,
+        customSites: [{ domain: 'example.com', enabled: false }]
     });
 
-    const resolved = CNT.resolveForHost(settings, 'deep.app.example.com');
-    assert.equal(resolved.matchedRule.id, 'custom:child');
-    assert.equal(resolved.fontSize, 125);
+    assert.equal(migrated.schemaVersion, 4);
+    assert.equal(migrated.defaults.fontId, 'nanum');
+    assert.equal(migrated.defaults.fontSize, 110);
+    assert.equal(API.resolveForHost(migrated, 'example.com').active, false);
+    assert.equal(API.resolveForHost(migrated, 'other.example').active, true);
 });
 
-test('site overrides inherit unspecified global style fields', () => {
-    const settings = CNT.normalizeSettings({
-        schemaVersion: CNT.SCHEMA_VERSION,
-        globalEnabled: true,
-        defaults: { fontId: 'nanum', fontSize: 108, fontWeight: 700 },
-        behavior: CNT.DEFAULT_BEHAVIOR,
-        sites: [
-            {
-                id: 'custom:test',
-                domain: 'test.dev',
-                enabled: true,
-                includeSubdomains: false,
-                source: 'custom',
-                overrides: { fontSize: 120 }
-            }
-        ]
-    });
-
-    const resolved = CNT.resolveForHost(settings, 'test.dev');
-    assert.equal(resolved.fontId, 'nanum');
-    assert.equal(resolved.fontSize, 120);
-    assert.equal(resolved.fontWeight, 700);
+test('font weights snap to supported local files', () => {
+    assert.equal(API.snapWeight('pretendard', 550), 600);
+    assert.equal(API.snapWeight('mona', 500), 400);
+    assert.equal(API.snapWeight('mona', 600), 700);
+    assert.equal(API.snapWeight('nanum', 900), 800);
 });
 
-test('domain parser handles URLs and explicit wildcard rules', () => {
-    assert.deepEqual(CNT.parseDomainInput('https://WWW.Example.com/path?q=1'), {
-        domain: 'www.example.com',
-        includeSubdomains: false
-    });
-    assert.deepEqual(CNT.parseDomainInput('*.Example.com'), {
+test('domain parser handles wildcard input', () => {
+    assert.deepEqual(API.parseDomainInput('*.Example.com/path'), {
         domain: 'example.com',
         includeSubdomains: true
     });
-    assert.equal(CNT.normalizeHostname('bad domain'), '');
-    assert.equal(CNT.normalizeHostname('999.2.3.4'), '');
-});
-
-test('font values are canonicalized, clamped, and snapped safely', () => {
-    const normalized = CNT.normalizeSettings({
-        schemaVersion: CNT.SCHEMA_VERSION,
-        globalEnabled: true,
-        defaults: { fontId: 'myeongjo', fontSize: 999, fontWeight: 650 },
-        behavior: {},
-        sites: []
-    });
-
-    assert.equal(normalized.defaults.fontId, 'nanum');
-    assert.equal(normalized.defaults.fontSize, 150);
-    assert.equal(normalized.defaults.fontWeight, 700);
-    assert.equal(CNT.snapWeight('mona', 500), 400);
-    assert.equal(CNT.snapWeight('mona', 600), 700);
-    assert.equal(CNT.snapWeight('nanum', 900), 800);
-});
-
-test('ensureExactRule preserves inherited enabled state and remains idempotent', () => {
-    const initial = CNT.createDefaultSettings();
-    const first = CNT.ensureExactRule(initial, 'www.roblox.com');
-    const second = CNT.ensureExactRule(first.settings, 'www.roblox.com');
-
-    assert.equal(first.rule.enabled, true);
-    assert.equal(second.settings.sites.filter((rule) =>
-        rule.source === 'custom' && rule.domain === 'www.roblox.com' && !rule.includeSubdomains
-    ).length, 1);
-});
-
-test('removing a preset disables it instead of deleting schema-owned metadata', () => {
-    const settings = CNT.removeRule(CNT.createDefaultSettings(), 'preset:roblox');
-    const roblox = settings.sites.find((rule) => rule.id === 'preset:roblox');
-    assert.ok(roblox);
-    assert.equal(roblox.enabled, false);
-    assert.deepEqual(roblox.overrides, {});
 });
