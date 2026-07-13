@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "CNT — Font Changer",
-  "version": "3.0.0",
-  "description": "사이트별 폰트, 글자 크기와 굵기를 정밀하게 적용하고 동적 텍스트·Shadow DOM까지 감지합니다.",
+  "version": "4.0.0",
+  "description": "모든 사이트에 폰트를 즉시 적용하고 사이트별 크기·굵기·예외 규칙을 관리합니다.",
   "minimum_chrome_version": "109",
   "icons": {
     "16": "icons/icon16.png",
