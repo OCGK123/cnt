@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CNT 폰트 설정</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="app" id="app" data-loading="true" data-preview-font="pretendard" data-preview-weight="400">
+    <header class="app-header">
+      <div class="brand" aria-label="CNT Font Changer">
+        <span class="brand-mark" aria-hidden="true">C</span>
+        <span class="brand-copy">
+          <strong>CNT</strong>
+          <small>Font Changer</small>
+        </span>
+      </div>
+
+      <label class="switch-control switch-control-header" for="masterToggle">
+        <span class="switch-copy">
+          <strong>전체 적용</strong>
+          <small id="masterStateText">불러오는 중</small>
+        </span>
+        <input class="visually-hidden" type="checkbox" id="masterToggle" role="switch" disabled>
+        <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
+      </label>
+    </header>
+
+    <section class="current-site-card" aria-labelledby="currentSiteTitle">
+      <div class="site-summary">
+        <span class="status-dot" id="siteStatusDot" aria-hidden="true"></span>
+        <div class="site-copy">
+          <span class="eyebrow">현재 사이트</span>
+          <h1 id="currentSiteTitle">사이트 확인 중</h1>
+        </div>
+        <span class="status-badge" id="effectiveStatus">확인 중</span>
+      </div>
+
+      <div class="site-control-row">
+        <div>
+          <strong>정확한 호스트 규칙</strong>
+          <p id="siteToggleHint">이 주소에만 별도로 적용합니다.</p>
+        </div>
+        <label class="icon-switch" for="siteToggle">
+          <span class="visually-hidden">현재 호스트 폰트 적용</span>
+          <input class="visually-hidden" type="checkbox" id="siteToggle" role="switch" disabled aria-describedby="siteToggleHint">
+          <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
+        </label>
+      </div>
+    </section>
+
+    <div class="loading-state" id="loadingState" role="status" aria-live="polite">
+      <span class="visually-hidden">설정을 불러오는 중입니다.</span>
+      <div class="skeleton skeleton-wide"></div>
+      <div class="skeleton-grid" aria-hidden="true">
+        <div class="skeleton skeleton-card"></div>
+        <div class="skeleton skeleton-card"></div>
+        <div class="skeleton skeleton-card"></div>
+      </div>
+      <div class="skeleton skeleton-panel"></div>
+    </div>
+
+    <main class="workspace" id="workspace" hidden>
+      <div class="scope-switch" role="group" aria-label="설정 적용 범위">
+        <button type="button" class="scope-button active" id="scopeGlobal" data-scope="global" aria-pressed="true">전체 기본값</button>
+        <button type="button" class="scope-button" id="scopeSite" data-scope="site" aria-pressed="false" disabled>현재 사이트</button>
+      </div>
+
+      <nav class="tab-list" role="tablist" aria-label="설정 메뉴">
+        <button type="button" class="tab-button active" id="tabStyle" role="tab" aria-selected="true" aria-controls="panelStyle" tabindex="0" data-tab="style">
+          <span aria-hidden="true">Aa</span> 스타일
+        </button>
+        <button type="button" class="tab-button" id="tabSites" role="tab" aria-selected="false" aria-controls="panelSites" tabindex="-1" data-tab="sites">
+          <span aria-hidden="true">◎</span> 사이트
+        </button>
+        <button type="button" class="tab-button" id="tabSettings" role="tab" aria-selected="false" aria-controls="panelSettings" tabindex="-1" data-tab="settings">
+          <span aria-hidden="true">⚙</span> 설정
+        </button>
+      </nav>
+
+      <div class="tab-panels">
+        <section class="tab-panel active" id="panelStyle" role="tabpanel" aria-labelledby="tabStyle" tabindex="0">
+          <div class="section-heading">
+            <div>
+              <span class="eyebrow">FONT FAMILY</span>
+              <h2>폰트 선택</h2>
+            </div>
+            <button type="button" class="inherit-button" id="inheritFont" data-inherit-property="fontId" hidden>기본값 사용</button>
+          </div>
+
+          <fieldset class="font-choices" id="fontChoices">
+            <legend class="visually-hidden">적용할 폰트</legend>
+            <label class="font-card" for="fontMona">
+              <input class="visually-hidden font-radio" type="radio" name="fontId" id="fontMona" value="mona">
+              <span class="font-card-body">
+                <span class="font-card-top">
+                  <strong>Mona 픽셀</strong>
+                  <span class="radio-dot" aria-hidden="true"></span>
+                </span>
+                <span class="font-sample font-sample-mona" data-weight="400">가나다 Aa 123</span>
+                <small>또렷한 12px 픽셀</small>
+              </span>
+            </label>
+
+            <label class="font-card" for="fontPretendard">
+              <input class="visually-hidden font-radio" type="radio" name="fontId" id="fontPretendard" value="pretendard">
+              <span class="font-card-body">
+                <span class="font-card-top">
+                  <strong>Pretendard</strong>
+                  <span class="radio-dot" aria-hidden="true"></span>
+                </span>
+                <span class="font-sample font-sample-pretendard" data-weight="400">가나다 Aa 123</span>
+                <small>100–900 전 굵기</small>
+              </span>
+            </label>
+
+            <label class="font-card" for="fontMyeongjo">
+              <input class="visually-hidden font-radio" type="radio" name="fontId" id="fontMyeongjo" value="myeongjo">
+              <span class="font-card-body">
+                <span class="font-card-top">
+                  <strong>나눔명조</strong>
+                  <span class="radio-dot" aria-hidden="true"></span>
+                </span>
+                <span class="font-sample font-sample-myeongjo" data-weight="400">가나다 Aa 123</span>
+                <small>차분한 400·700·800</small>
+              </span>
+            </label>
+          </fieldset>
+
+          <div class="control-card">
+            <div class="control-heading">
+              <label for="sizeSlider">
+                <strong>글자 크기</strong>
+                <small id="sizeContext">전체 기본 배율</small>
+              </label>
+              <div class="value-actions">
+                <button type="button" class="inherit-button" id="inheritSize" data-inherit-property="fontSize" hidden>기본값</button>
+                <output class="value-pill" id="sizeValue" for="sizeSlider">100%</output>
+              </div>
+            </div>
+            <input class="range" type="range" id="sizeSlider" min="75" max="150" step="1" value="100" aria-describedby="sizeHint" aria-valuetext="100퍼센트">
+            <div class="range-scale" aria-hidden="true"><span>75%</span><span>100%</span><span>150%</span></div>
+            <div class="quick-values" role="group" aria-label="글자 크기 빠른 선택">
+              <button type="button" class="quick-button" data-size="90">90%</button>
+              <button type="button" class="quick-button active" data-size="100">100%</button>
+              <button type="button" class="quick-button" data-size="110">110%</button>
+              <button type="button" class="quick-button" data-size="125">125%</button>
+            </div>
+            <p class="control-hint" id="sizeHint">레이아웃을 과도하게 깨뜨리지 않는 비누적 배율입니다.</p>
+          </div>
+
+          <div class="control-card">
+            <div class="control-heading">
+              <label for="weightSlider">
+                <strong>폰트 굵기</strong>
+                <small id="weightContext">선택한 폰트에 맞춰 자동 보정</small>
+              </label>
+              <div class="value-actions">
+                <button type="button" class="inherit-button" id="inheritWeight" data-inherit-property="fontWeight" hidden>기본값</button>
+                <output class="value-pill" id="weightValue" for="weightSlider">400</output>
+              </div>
+            </div>
+            <input class="range" type="range" id="weightSlider" min="100" max="900" step="100" value="400" aria-describedby="weightHint weightSupport" aria-valuetext="보통 400">
+            <div class="range-scale" aria-hidden="true"><span>100</span><span>500</span><span>900</span></div>
+            <div class="weight-result" id="weightSupport">
+              <span>요청 <strong id="requestedWeight">400</strong></span>
+              <span class="weight-arrow" aria-hidden="true">→</span>
+              <span>실제 <strong id="actualWeight">400</strong></span>
+            </div>
+            <p class="control-hint" id="weightHint">지원하지 않는 굵기는 가장 가까운 실제 굵기로 적용합니다.</p>
+          </div>
+
+          <div class="live-preview" id="livePreview" data-font="pretendard" data-weight="400" aria-label="선택한 스타일 미리보기">
+            <span class="eyebrow">LIVE PREVIEW</span>
+            <p>좋은 글자는 화면을 더 편안하게 만듭니다.</p>
+            <small>The quick brown fox · 0123456789</small>
+          </div>
+
+          <button type="button" class="secondary-button site-default-button" id="inheritAll" hidden>현재 사이트 스타일을 모두 기본값으로</button>
+        </section>
+
+        <section class="tab-panel" id="panelSites" role="tabpanel" aria-labelledby="tabSites" tabindex="0" hidden>
+          <div class="section-heading">
+            <div>
+              <span class="eyebrow">SITE RULES</span>
+              <h2>사이트 관리</h2>
+            </div>
+            <span class="count-badge" id="siteCount">0</span>
+          </div>
+
+          <button type="button" class="primary-button" id="addCurrentSite" disabled>
+            <span aria-hidden="true">＋</span>
+            <span id="addCurrentSiteText">현재 사이트 추가</span>
+          </button>
+
+          <form class="add-site-form" id="addSiteForm" novalidate>
+            <label for="siteInput">URL 또는 도메인</label>
+            <div class="input-row">
+              <input type="text" id="siteInput" inputmode="url" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="example.com 또는 https://example.com">
+              <button type="submit" class="compact-button">추가</button>
+            </div>
+            <p class="field-message" id="siteInputMessage">주소를 붙여 넣으면 호스트만 안전하게 정리합니다.</p>
+          </form>
+
+          <section class="site-section" aria-labelledby="presetTitle">
+            <div class="subheading-row">
+              <h3 id="presetTitle">빠른 프리셋</h3>
+              <small>하위 도메인 포함</small>
+            </div>
+            <div class="preset-list" id="presetList"></div>
+          </section>
+
+          <section class="site-section" aria-labelledby="ruleTitle">
+            <div class="subheading-row">
+              <h3 id="ruleTitle">사용자 규칙과 예외</h3>
+              <small>가장 구체적인 규칙 우선</small>
+            </div>
+            <label class="search-box" for="siteSearch">
+              <span aria-hidden="true">⌕</span>
+              <span class="visually-hidden">사이트 규칙 검색</span>
+              <input type="search" id="siteSearch" placeholder="도메인 검색" autocomplete="off">
+            </label>
+            <div class="rule-list" id="ruleList"></div>
+            <div class="empty-state" id="ruleEmpty">
+              <span aria-hidden="true">◎</span>
+              <strong>아직 사용자 규칙이 없습니다.</strong>
+              <p>현재 사이트 또는 원하는 주소를 추가해 보세요.</p>
+            </div>
+          </section>
+        </section>
+
+        <section class="tab-panel" id="panelSettings" role="tabpanel" aria-labelledby="tabSettings" tabindex="0" hidden>
+          <div class="section-heading">
+            <div>
+              <span class="eyebrow">PREFERENCES</span>
+              <h2>보호 설정</h2>
+            </div>
+          </div>
+
+          <div class="settings-list">
+            <label class="setting-row" for="protectIcons">
+              <span class="setting-icon" aria-hidden="true">◇</span>
+              <span class="setting-copy">
+                <strong>아이콘 폰트 보호</strong>
+                <small>Material Icons와 심볼 글꼴을 유지합니다.</small>
+              </span>
+              <input class="visually-hidden" type="checkbox" id="protectIcons" role="switch">
+              <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
+            </label>
+
+            <label class="setting-row" for="protectCode">
+              <span class="setting-icon" aria-hidden="true">&lt;/&gt;</span>
+              <span class="setting-copy">
+                <strong>코드 글꼴 보호</strong>
+                <small>code, pre, kbd의 고정폭 글꼴을 유지합니다.</small>
+              </span>
+              <input class="visually-hidden" type="checkbox" id="protectCode" role="switch">
+              <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
+            </label>
+          </div>
+
+          <div class="about-card">
+            <div>
+              <span>CNT Font Changer</span>
+              <strong id="manifestVersion">버전 확인 중</strong>
+            </div>
+            <p>설정은 브라우저 저장소에 보관되며 페이지 내용은 수집하지 않습니다.</p>
+          </div>
+
+          <button type="button" class="danger-button" id="resetSettings">모든 설정 초기화</button>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
+
+  <script src="shared.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>
